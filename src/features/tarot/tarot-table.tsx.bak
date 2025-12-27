@@ -1,4 +1,4 @@
-import { useMutation } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Dimensions,
@@ -14,6 +14,8 @@ import {
 import Animated, {
   useAnimatedStyle,
   useSharedValue,
+  withDelay,
+  withSpring,
 } from 'react-native-reanimated';
 
 import { TypewriterText } from '../../components/TypewriterText';
@@ -22,25 +24,11 @@ import { AdBanner, useInterstitialAd } from '../monetization/ad-manager';
 import { SubscriptionModal } from '../monetization/subscription-modal';
 import { CardComponent } from './card-component';
 
-// Safe Dimensions Check
 const { width, height } = Dimensions.get('window');
-const SAFE_WIDTH = width || 375;
-const SAFE_HEIGHT = height || 812;
-
 const CARD_WIDTH = 80;
 const CARD_HEIGHT = 120;
-
-// Coordinate System relative to tableArea (which is flex:1 inside modal)
-const CENTER_X = SAFE_WIDTH / 2 - CARD_WIDTH / 2;
-const CENTER_Y = SAFE_HEIGHT / 3;
-
-console.log('[TarotTable] Dimensions:', {
-  width,
-  height,
-  SAFE_WIDTH,
-  SAFE_HEIGHT,
-});
-console.log('[TarotTable] Center:', { CENTER_X, CENTER_Y });
+const CENTER_X = width / 2 - CARD_WIDTH / 2;
+const CENTER_Y = height / 2.5;
 
 // 5 Card Cross Positions (Adjusted for Modal)
 const POSITIONS = [
@@ -74,137 +62,93 @@ export const TarotTable = () => {
   const [revealedIds, setRevealedIds] = useState<Set<string>>(new Set());
   const [showSubscription, setShowSubscription] = useState(false);
 
-  // Flow States
-  const [readyToReveal, setReadyToReveal] = useState(false);
-  const [isCompleted, setIsCompleted] = useState(false);
-
   const scrollViewRef = useRef<ScrollView>(null);
   const { showAd } = useInterstitialAd();
 
-  // Use mutation for imperative fetching
-  const { mutateAsync: askTarot, isPending: isFetching } = useMutation({
-    mutationFn: fetchTarotReading,
+  const { refetch, isFetching } = useQuery({
+    queryKey: ['tarot', question],
+    queryFn: () => fetchTarotReading(question),
+    enabled: false,
   });
 
   const handleConsult = async () => {
     if (!question.trim()) return;
 
-    // Capture question and clear input immediately
-    const currentQuestion = question;
-    setQuestion('');
-
-    // Reset States for new reading
-    setIsCompleted(false);
-    setReadyToReveal(false);
-    setRevealedIds(new Set());
-
     // add user message
     const userMsg: Message = {
       id: Date.now().toString(),
-      text: currentQuestion,
+      text: question,
       sender: 'user',
     };
     setMessages((prev) => [...prev, userMsg]);
+    setQuestion('');
+
+    // Show Ad
+    showAd();
 
     // Fetch AI
-    try {
-      const data = await askTarot(currentQuestion);
+    const result = await refetch();
 
-      if (data) {
-        setCurrentReading(data);
+    if (result.data) {
+      setCurrentReading(result.data);
+      // Add First Answer
+      const answerMsg: Message = {
+        id: Date.now().toString() + '_1',
+        text: result.data.first_answer,
+        sender: 'seer',
+      };
+      setMessages((prev) => [...prev, answerMsg]);
 
-        // Add First Answer with Spread Type
-        const introText = `${data.first_answer}\n\nI shall cast a ${data.card_disposition.toUpperCase().replace('_', ' ')} spread.`;
-        const answerMsg: Message = {
-          id: Date.now().toString() + '_1',
-          text: introText,
-          sender: 'seer',
-          isTyping: true,
-        };
-        setMessages((prev) => [...prev, answerMsg]);
-
-        // Enable manual reveal
-        setReadyToReveal(true);
-      }
-    } catch (error) {
-      console.error('Tarot fetch likely failed', error);
+      // Open Modal after slight delay
+      setTimeout(() => {
+        setRevealedIds(new Set()); // Reset revealed
+        setIsModalVisible(true);
+      }, 1500);
     }
   };
 
-  const handleRevealPress = () => {
-    // First time reveal
-    setReadyToReveal(false);
-    setIsModalVisible(true);
-  };
-
-  const handleReviewPress = () => {
-    // Review mode: Open modal, don't reset anything
-    setIsModalVisible(true);
-  };
-
   const handleCardPress = (cardId: string) => {
-    console.log(`[TarotTable] Card pressed: ${cardId}`);
     setRevealedIds((prev) => {
       const next = new Set(prev);
       next.add(cardId);
-      console.log(`[TarotTable] Revealed count: ${next.size}`);
       return next;
     });
   };
 
-  const handleCompleteReading = () => {
-    console.log('[TarotTable] Completing Reading...');
-    setIsModalVisible(false); // Close modal
-
-    // Only trigger completion logic if not already done (avoids loops in Review mode)
-    if (!isCompleted) {
-      setIsCompleted(true);
-
-      // Show Ad NOW (Post-Reading)
-      showAd();
-
-      // Add Outcome message with streaming
-      if (currentReading) {
-        const outcomeMsg: Message = {
-          id: Date.now().toString() + '_outcome',
-          text: currentReading.outcome,
-          sender: 'seer',
-          isTyping: true,
-        };
-        setMessages((prev) => [...prev, outcomeMsg]);
-      }
-    }
-  };
-
-  // Auto-Close Logic
+  // Check if all cards revealed
   useEffect(() => {
-    // Check logic
-    if (!currentReading) return;
-
-    const totalCards = currentReading.cards_pulled.length;
-    const revealedCount = revealedIds.size;
-
-    console.log(
-      `[AutoClose] Visible:${isModalVisible} Done:${isCompleted} Revealed:${revealedCount}/${totalCards}`
-    );
-
-    // Only auto-close if modal is visible, reading active, NOT completed yet, and all cards revealed
     if (
       isModalVisible &&
-      !isCompleted &&
-      revealedCount === totalCards &&
-      totalCards > 0
+      currentReading &&
+      revealedIds.size === currentReading.cards_pulled.length
     ) {
-      console.log('[AutoClose] Starting timer...');
-      const timer = setTimeout(() => {
-        handleCompleteReading();
-      }, 1500); // 1.5s delay to let user see the last card
-      return () => clearTimeout(timer);
+      // All revealed.
+      // Optional: Auto close or show button? User requirement: "User clicks to flip them, then returns to chat"
+      // Let's verify with a "Continue" button or auto-close delay?
+      // "outcome is shown in text chat"
+      // Let's add a small delay then show a button to close, or auto close.
+      // Auto close feels smoother.
+      /*
+          setTimeout(() => {
+              handleCloseModal();
+          }, 2000); 
+          */
     }
-  }, [revealedIds, isModalVisible, currentReading, isCompleted]);
+  }, [revealedIds, isModalVisible]);
 
-  const isAllRevealed =
-    currentReading && revealedIds.size === currentReading.cards_pulled.length;
+  const handleCloseModal = () => {
+    setIsModalVisible(false);
+    // Add Outcome message with streaming
+    if (currentReading) {
+      const outcomeMsg: Message = {
+        id: Date.now().toString() + '_outcome',
+        text: currentReading.outcome,
+        sender: 'seer',
+        isTyping: true,
+      };
+      setMessages((prev) => [...prev, outcomeMsg]);
+    }
+  };
 
   return (
     <SafeAreaView style={styles.container}>
@@ -246,46 +190,25 @@ export const TarotTable = () => {
             <Text style={styles.loadingText}>The cards are shuffling...</Text>
           </View>
         )}
-
-        {/* Show Reveal Button if ready AND not completed yet */}
-        {readyToReveal && !isCompleted && (
-          <View style={styles.revealContainer}>
-            <Pressable style={styles.revealButton} onPress={handleRevealPress}>
-              <Text style={styles.revealText}>Reveal the Cards</Text>
-            </Pressable>
-          </View>
-        )}
-
-        {/* If completed, show Review Button */}
-        {isCompleted && (
-          <View style={styles.revealContainer}>
-            <Pressable style={styles.reviewButton} onPress={handleReviewPress}>
-              <Text style={styles.reviewText}>Review Cards</Text>
-            </Pressable>
-          </View>
-        )}
       </ScrollView>
 
-      {(!readyToReveal || isCompleted) && (
-        <View style={styles.inputArea}>
-          <TextInput
-            style={styles.input}
-            placeholder="Ask..."
-            placeholderTextColor="#666"
-            value={question}
-            onChangeText={setQuestion}
-            onSubmitEditing={handleConsult}
-            editable={!isFetching}
-          />
-          <Pressable
-            onPress={handleConsult}
-            disabled={isFetching}
-            style={styles.sendButton}
-          >
-            <Text style={styles.sendText}>🔮</Text>
-          </Pressable>
-        </View>
-      )}
+      <View style={styles.inputArea}>
+        <TextInput
+          style={styles.input}
+          placeholder="Ask..."
+          placeholderTextColor="#666"
+          value={question}
+          onChangeText={setQuestion}
+          onSubmitEditing={handleConsult}
+        />
+        <Pressable
+          onPress={handleConsult}
+          disabled={isFetching}
+          style={styles.sendButton}
+        >
+          <Text style={styles.sendText}>🔮</Text>
+        </Pressable>
+      </View>
 
       <AdBanner />
       <SubscriptionModal
@@ -297,13 +220,17 @@ export const TarotTable = () => {
       <Modal visible={isModalVisible} transparent animationType="fade">
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>
-              {isCompleted ? 'Reviewing Fate' : 'Reveal Your Fate'}
-            </Text>
+            <Text style={styles.modalTitle}>Reveal Your Fate</Text>
             <View style={styles.tableArea}>
+              {/* Deck Placeholder */}
+              <View style={styles.deckPlaceholder} />
+
               {currentReading?.cards_pulled.map((card, index) => {
-                // Safe index access
-                const targetPos = POSITIONS[index] || POSITIONS[0];
+                const targetPos = POSITIONS[index] || {
+                  x: CENTER_X,
+                  y: CENTER_Y,
+                  rotate: '0deg',
+                };
                 return (
                   <DealingCard
                     key={card.id}
@@ -319,22 +246,15 @@ export const TarotTable = () => {
               })}
             </View>
 
-            {/* Hint Text */}
-            {!isCompleted && !isAllRevealed && (
-              <View style={styles.hintContainer}>
-                <Text style={styles.hintText}>Tap cards to reveal</Text>
-              </View>
-            )}
-
-            {/* Review Mode Close Button */}
-            {isCompleted && (
-              <Pressable
-                style={styles.closeReviewButton}
-                onPress={() => setIsModalVisible(false)}
-              >
-                <Text style={styles.closeReviewText}>Close Spread</Text>
-              </Pressable>
-            )}
+            {currentReading &&
+              revealedIds.size === currentReading.cards_pulled.length && (
+                <Pressable
+                  style={styles.continueButton}
+                  onPress={handleCloseModal}
+                >
+                  <Text style={styles.continueText}>Complete Reading</Text>
+                </Pressable>
+              )}
           </View>
         </View>
       </Modal>
@@ -342,7 +262,7 @@ export const TarotTable = () => {
   );
 };
 
-// Wrapper handling the deal animation (INSTANT NOW)
+// Wrapper handling the deal animation
 const DealingCard = ({
   card,
   index,
@@ -352,15 +272,14 @@ const DealingCard = ({
   isRevealed,
   onPress,
 }: any) => {
-  // Validate inputs
-  const safeTargetX =
-    typeof targetX === 'number' && !isNaN(targetX) ? targetX : CENTER_X;
-  const safeTargetY =
-    typeof targetY === 'number' && !isNaN(targetY) ? targetY : CENTER_Y;
+  const translateX = useSharedValue(width - 50); // Start off-screen (Deck position)
+  const translateY = useSharedValue(height - 50);
 
-  // Instant appearance - No animation delay
-  const translateX = useSharedValue(safeTargetX);
-  const translateY = useSharedValue(safeTargetY);
+  useEffect(() => {
+    // Dealing animation on mount
+    translateX.value = withDelay(index * 300, withSpring(targetX));
+    translateY.value = withDelay(index * 300, withSpring(targetY));
+  }, []);
 
   // Parse rotation for wrapper
   const rotationDeg = targetRotate === '90deg' ? '90deg' : '0deg';
@@ -373,8 +292,8 @@ const DealingCard = ({
         { translateY: translateY.value },
         { rotate: rotationDeg },
       ],
-      // zIndex hierarchy: Ensure cards are stacked naturally.
-      zIndex: index + 10,
+      // zIndex hierarchy for Cross
+      zIndex: index === 1 ? 20 : 10,
     };
   });
 
@@ -387,6 +306,9 @@ const DealingCard = ({
         width={CARD_WIDTH}
         height={CARD_HEIGHT}
         frontContent={
+          // Optional: Show Name only when flipped? Or always on top?
+          // Better to rely on the nice images now.
+          // Maybe small text at bottom if needed.
           isRevealed ? (
             <View style={styles.cardLabelContainer}>
               <Text style={styles.cardLabel}>{card.name}</Text>
@@ -492,47 +414,6 @@ const styles = StyleSheet.create({
   sendText: {
     fontSize: 16,
   },
-  revealContainer: {
-    marginTop: 20,
-    marginBottom: 20,
-    alignItems: 'center',
-  },
-  revealButton: {
-    backgroundColor: '#D4Af37',
-    paddingVertical: 12,
-    paddingHorizontal: 30,
-    borderRadius: 25,
-    shadowColor: '#D4Af37',
-    shadowOffset: {
-      width: 0,
-      height: 0,
-    },
-    shadowOpacity: 0.8,
-    shadowRadius: 10,
-    elevation: 5,
-  },
-  revealText: {
-    color: '#000',
-    fontWeight: 'bold',
-    fontSize: 16,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-  },
-  reviewButton: {
-    backgroundColor: 'transparent',
-    borderWidth: 1,
-    borderColor: '#D4Af37',
-    paddingVertical: 10,
-    paddingHorizontal: 25,
-    borderRadius: 25,
-  },
-  reviewText: {
-    color: '#D4Af37',
-    fontWeight: 'bold',
-    fontSize: 14,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-  },
   // Modal Styles
   modalOverlay: {
     flex: 1,
@@ -552,8 +433,7 @@ const styles = StyleSheet.create({
   },
   tableArea: {
     flex: 1,
-    position: 'relative',
-    width: '100%',
+    // position: 'relative',
   },
   deckPlaceholder: {
     position: 'absolute',
@@ -566,34 +446,20 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#444',
   },
-  hintContainer: {
-    position: 'absolute',
-    bottom: 50,
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-  },
-  hintText: {
-    color: '#888',
-    fontSize: 14,
-    fontStyle: 'italic',
-  },
-  closeReviewButton: {
+  continueButton: {
     position: 'absolute',
     bottom: 50,
     alignSelf: 'center',
-    backgroundColor: '#333',
-    borderWidth: 1,
-    borderColor: '#D4Af37',
+    backgroundColor: '#D4Af37',
     paddingVertical: 15,
     paddingHorizontal: 40,
     borderRadius: 30,
     zIndex: 100,
   },
-  closeReviewText: {
+  continueText: {
     fontWeight: 'bold',
     fontSize: 18,
-    color: '#D4Af37',
+    color: 'black',
   },
   cardLabelContainer: {
     position: 'absolute',

@@ -1,4 +1,4 @@
-package com.obytes.development
+package com.babayaga.development
 import expo.modules.splashscreen.SplashScreenManager
 
 import android.os.Build

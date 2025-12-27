@@ -9,20 +9,18 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 
-const CARD_BACK = require('../../../assets/tarot-back.png');
-const CARD_FRONT_PLACEHOLDER = require('../../../assets/tarot-front.png');
+import { CARD_BACK, getCardImage } from './assets';
 
 interface CardComponentProps {
-  id: string;
+  id: string; // Used to fetch the image
   isFlipped: boolean;
   onPress: () => void;
   width?: number;
   height?: number;
-  // Optional: Pass specific image or text to overlay on the front
   frontContent?: React.ReactNode;
 }
 
-const DURATION = 800;
+const DURATION = 1000; // Slightly faster for responsiveness, but still grand
 
 export const CardComponent = ({
   id,
@@ -35,63 +33,76 @@ export const CardComponent = ({
   const rotateY = useSharedValue(0);
 
   useEffect(() => {
+    // 0 = Not Flipped (Back Visible), 180 = Flipped (Front Visible)
     rotateY.value = withTiming(isFlipped ? 180 : 0, { duration: DURATION });
   }, [isFlipped]);
 
+  // Front Face (The Asset)
+  // Logic: Starts at 180 (Hidden/Behind). Ends at 360 (0) (Visible/Front).
   const frontStyle = useAnimatedStyle(() => {
-    const rotateValue = interpolate(
-      rotateY.value,
-      [0, 180],
-      [0, 180],
-      Extrapolation.CLAMP
-    );
-    return {
-      transform: [{ perspective: 1000 }, { rotateY: `${rotateValue}deg` }],
-      opacity: rotateY.value < 90 ? 0 : 1, // Hack to hide front when back is visible? No, better use backfaceVisibility but that is tricky on Android sometimes.
-      // Standard way:
-      zIndex: rotateY.value < 90 ? 0 : 1,
-    };
-  });
-
-  const backStyle = useAnimatedStyle(() => {
     const rotateValue = interpolate(
       rotateY.value,
       [0, 180],
       [180, 360],
       Extrapolation.CLAMP
     );
-
     return {
       transform: [{ perspective: 1000 }, { rotateY: `${rotateValue}deg` }],
-      zIndex: rotateY.value < 90 ? 1 : 0,
+      zIndex: rotateY.value < 90 ? 0 : 10, // Higher zIndex when flipped
+      opacity: rotateY.value < 90 ? 0 : 1, // Ensure hidden when back is showing
     };
   });
 
+  // Back Face (The Purple Pattern)
+  // Logic: Starts at 0 (Visible). Ends at 180 (Hidden).
+  const backStyle = useAnimatedStyle(() => {
+    const rotateValue = interpolate(
+      rotateY.value,
+      [0, 180],
+      [0, 180],
+      Extrapolation.CLAMP
+    );
+
+    return {
+      transform: [{ perspective: 1000 }, { rotateY: `${rotateValue}deg` }],
+      zIndex: rotateY.value < 90 ? 10 : 0, // Higher zIndex when NOT flipped
+      opacity: rotateY.value > 90 ? 0 : 1, // Ensure hidden when front is showing
+    };
+  });
+
+  const cardImage = getCardImage(id);
+
+  const handlePress = () => {
+    console.log(
+      `[CardComponent] Pressed id: ${id} | Current Flipped: ${isFlipped}`
+    );
+    onPress();
+  };
+
   return (
-    <Pressable onPress={onPress}>
+    <Pressable onPress={handlePress}>
       <View style={{ width, height }}>
-        {/* Back of Card */}
+        {/* Back of Card: Visible at Start */}
         <Animated.View
           style={[styles.card, styles.cardBack, backStyle, { width, height }]}
         >
-          <Image
-            source={CARD_BACK}
-            style={{ width: '100%', height: '100%', borderRadius: 8 }}
-            contentFit="cover"
-          />
+          <Image source={CARD_BACK} style={styles.image} contentFit="fill" />
         </Animated.View>
 
-        {/* Front of Card */}
+        {/* Front of Card: Hidden at Start, Visible on Flip */}
         <Animated.View
           style={[styles.card, styles.cardFront, frontStyle, { width, height }]}
         >
-          <Image
-            source={CARD_FRONT_PLACEHOLDER}
-            style={{ width: '100%', height: '100%', borderRadius: 8 }}
-            contentFit="cover"
-          />
+          {/* Debug Text to ensure front is rendering if image fails */}
+          {/* <Text style={{position: 'absolute', top: 0, left: 0, fontSize: 8, color: 'red', zIndex: 100}}>{id}</Text> */}
+
+          <Image source={cardImage} style={styles.image} contentFit="fill" />
           {frontContent && (
-            <View style={StyleSheet.absoluteFill}>{frontContent}</View>
+            <View
+              style={[StyleSheet.absoluteFill, { justifyContent: 'flex-end' }]}
+            >
+              {frontContent}
+            </View>
           )}
         </Animated.View>
       </View>
@@ -112,11 +123,20 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.25,
     shadowRadius: 3.84,
     elevation: 5,
+    overflow: 'hidden', // Ensure content doesn't bleed
   },
   cardBack: {
-    // backgroundColor: '#1a1a2e',
+    backgroundColor: '#1a1a2e', // Fallback color matches back theme
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   cardFront: {
-    // backgroundColor: '#f4f1ea',
+    backgroundColor: '#f4f1ea', // Fallback color matches front theme
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  image: {
+    width: '100%',
+    height: '100%',
   },
 });
